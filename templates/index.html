@@ -10,6 +10,53 @@
     <style>
         .skill-bar { transition: width 0.5s ease-in-out; }
         .chart-container { position: relative; width: 100%; max-height: 220px; }
+
+        @keyframes fadeInUp {
+            from { opacity: 0; transform: translateY(15px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .vacancy-card {
+            animation: fadeInUp 0.3s ease-out forwards;
+            opacity: 0;
+        }
+
+        @keyframes modalIn {
+            from { opacity: 0; transform: scale(0.9); }
+            to { opacity: 1; transform: scale(1); }
+        }
+        #vacancyModal > div {
+            animation: modalIn 0.2s ease-out;
+        }
+
+        @keyframes fadeSkill {
+            from { opacity: 0; transform: translateX(-10px); }
+            to { opacity: 1; transform: translateX(0); }
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+        .loader-pulse { animation: pulse 1.5s ease-in-out infinite; }
+
+        button {
+            transition: all 0.2s ease;
+        }
+        button:active:not(:disabled) {
+            transform: scale(0.97);
+        }
+
+        #loadMoreBtn {
+            transition: all 0.2s ease;
+        }
+        #loadMoreBtn:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+        }
+
+        .fade-in {
+            animation: fadeInUp 0.3s ease-out forwards;
+        }
     </style>
 </head>
 <body class="bg-gray-100">
@@ -56,7 +103,7 @@
         </div>
 
         <div id="loading" class="hidden text-center py-6">
-            <div class="inline-block animate-spin rounded-full h-6 w-6 border-b-2 border-blue-600"></div>
+            <div class="inline-block animate-spin rounded-full h-6 w-6 border-b-2 border-blue-600 loader-pulse"></div>
             <p class="text-sm text-gray-500 mt-2">Поиск вакансий может занять до 2 минут</p>
         </div>
         <div id="error" class="hidden bg-red-100 border border-red-400 text-red-700 px-4 py-2 rounded mb-4 text-sm"></div>
@@ -310,7 +357,7 @@
             const container = document.getElementById('vacanciesList');
             container.innerHTML = '';
             const toShow = vacancies.slice(0, window.displayCount);
-            toShow.forEach(v => {
+            toShow.forEach((v, i) => {
                 let salary = 'Не указана';
                 let salaryConverted = '';
                 if (v.salary) {
@@ -326,7 +373,7 @@
                 const skills = (v.key_skills || []).slice(0, 5).map(s => `<span class="bg-blue-100 text-blue-800 text-xs px-1.5 py-0.5 rounded">${s}</span>`).join(' ');
                 const responses = v.responses_count != null ? `<span class="text-gray-400 text-xs ml-2">~${v.responses_count} откл.</span>` : '';
                 container.innerHTML += `
-                    <div class="border rounded p-3 hover:shadow text-sm">
+                    <div class="vacancy-card border rounded p-3 hover:shadow text-sm" style="animation-delay: ${i * 0.04}s">
                         <div class="flex justify-between items-start gap-2">
                             <div class="min-w-0">
                                 <a href="${v.url}" target="_blank" class="font-medium text-blue-600 hover:underline truncate block">${v.name}</a>
