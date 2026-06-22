@@ -1,0 +1,444 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HH Analyzer</title>
+    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        .skill-bar { transition: width 0.5s ease-in-out; }
+        .chart-container { position: relative; width: 100%; max-height: 220px; }
+    </style>
+</head>
+<body class="bg-gray-100">
+    <div class="container mx-auto px-4 py-6 max-w-6xl">
+        <div class="flex justify-between items-center mb-6">
+            <h1 class="text-2xl font-bold text-gray-800">HH Analyzer</h1>
+        </div>
+
+        <div class="bg-white rounded-lg shadow p-4 mb-4">
+            <form id="searchForm" class="space-y-3">
+                <div class="grid grid-cols-1 md:grid-cols-4 gap-3">
+                    <div class="md:col-span-2">
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Поиск</label>
+                        <input type="text" id="searchText" name="text" required class="w-full px-3 py-2 border rounded focus:ring-2 focus:ring-blue-500" placeholder="Python разработчик">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Город</label>
+                        <select name="area" class="w-full px-3 py-2 border rounded focus:ring-2 focus:ring-blue-500">
+                            <option value="">Все города</option>
+                            {% for code, name in areas.items() %}
+                            <option value="{{ code }}">{{ name }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">График</label>
+                        <select name="schedule" class="w-full px-3 py-2 border rounded focus:ring-2 focus:ring-blue-500">
+                            <option value="">Все типы</option>
+                            {% for code, name in schedules.items() %}
+                            <option value="{{ code }}">{{ name }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                </div>
+                <div class="flex gap-3 items-center">
+                    <button type="submit" class="bg-blue-600 text-white px-5 py-2 rounded hover:bg-blue-700">Найти</button>
+                    <button type="button" id="exportBtn" class="bg-green-600 text-white px-5 py-2 rounded hover:bg-green-700 hidden">CSV</button>
+                    <label class="flex items-center gap-1.5 text-sm text-gray-600 cursor-pointer">
+                        <input type="checkbox" id="titleOnly" class="rounded">
+                        Только в названии
+                    </label>
+                </div>
+            </form>
+        </div>
+
+        <div id="loading" class="hidden text-center py-6">
+            <div class="inline-block animate-spin rounded-full h-6 w-6 border-b-2 border-blue-600"></div>
+            <p class="text-sm text-gray-500 mt-2">Поиск вакансий может занять до 2 минут</p>
+        </div>
+        <div id="error" class="hidden bg-red-100 border border-red-400 text-red-700 px-4 py-2 rounded mb-4 text-sm"></div>
+
+        <div id="results" class="hidden">
+            <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mb-4">
+                <div class="bg-white rounded-lg shadow p-4">
+                    <h3 class="text-sm font-semibold mb-2">Топ навыков</h3>
+                    <div id="skillsChart" class="space-y-1.5" style="max-height: 220px; overflow-y: auto;"></div>
+                </div>
+                <div class="bg-white rounded-lg shadow p-4">
+                    <h3 class="text-sm font-semibold mb-2">Топ по названиям вакансий</h3>
+                    <div id="titleKeywordsChart" class="space-y-1.5" style="max-height: 220px; overflow-y: auto;"></div>
+                </div>
+                <div class="bg-white rounded-lg shadow p-4">
+                    <h3 class="text-sm font-semibold mb-2">Опыт работы</h3>
+                    <div class="chart-container"><canvas id="experienceChart"></canvas></div>
+                </div>
+                <div class="bg-white rounded-lg shadow p-4">
+                    <h3 class="text-sm font-semibold mb-2">График работы</h3>
+                    <div class="chart-container"><canvas id="scheduleChart"></canvas></div>
+                </div>
+            </div>
+
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+                <div class="bg-white rounded-lg shadow p-4">
+                    <h3 class="text-sm font-semibold mb-2">Зарплата (медиана, руб.)</h3>
+                    <div class="chart-container"><canvas id="salaryChart"></canvas></div>
+                </div>
+                <div class="bg-white rounded-lg shadow p-4">
+                    <h3 class="text-sm font-semibold mb-2">Частые тандемы технологий</h3>
+                    <div id="tandemsChart" class="space-y-1.5" style="max-height: 220px; overflow-y: auto;"></div>
+                </div>
+            </div>
+
+            <div class="bg-white rounded-lg shadow p-4 mb-4">
+                <h2 class="text-lg font-semibold mb-3">Вакансии: <span id="totalCount"></span> <span id="avgResponses" class="text-sm font-normal text-gray-500"></span></h2>
+                <div id="vacanciesList" class="space-y-2"></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let charts = {};
+        window.allData = null;
+        window.displayCount = 15;
+        window.currentItems = [];
+
+        document.getElementById('searchForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            await searchVacancies();
+        });
+
+        document.getElementById('titleOnly').addEventListener('change', () => {
+            if (window.allData) applyTitleFilter();
+        });
+
+        document.getElementById('exportBtn').addEventListener('click', () => {
+            if (!window.allData) return;
+            const btn = document.getElementById('exportBtn');
+            const originalText = btn.textContent;
+            btn.disabled = true;
+            btn.textContent = 'Загрузка...';
+            try {
+                const items = window.filteredItems || window.allData.results.items;
+                const rows = [['ID','Название','Компания','Город','Опыт','График','Зарплата от','Зарплата до','Навыки','Описание','Ссылка']];
+                items.forEach(v => {
+                    const s = v.salary || {};
+                    rows.push([
+                        v.id, v.name, v.employer, v.area, v.experience, v.schedule,
+                        s.from || '', s.to || '',
+                        (v.key_skills || []).join(', '),
+                        (v.description || '').replace(/<[^>]*>/g, ''),
+                        v.url
+                    ]);
+                });
+                const csv = '\uFEFF' + rows.map(r => r.map(c => '"' + String(c).replace(/"/g, '""') + '"').join(',')).join('\n');
+                const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+                const a = document.createElement('a');
+                a.href = URL.createObjectURL(blob);
+                a.download = (document.getElementById('searchText').value.trim() || 'hh_vacancies') + '.csv';
+                a.click();
+            } finally {
+                btn.disabled = false;
+                btn.textContent = originalText;
+            }
+        });
+
+        async function applyTitleFilter() {
+            if (!window.allData) return;
+            const loadingEl = document.getElementById('loading');
+            loadingEl.classList.remove('hidden');
+            try {
+                const text = document.getElementById('searchText').value.toLowerCase();
+                const titleOnly = document.getElementById('titleOnly').checked;
+                if (titleOnly) {
+                    window.filteredItems = window.allData.results.items.filter(v => v.name.toLowerCase().includes(text));
+                } else {
+                    window.filteredItems = window.allData.results.items;
+                }
+                window.currentItems = window.filteredItems;
+                window.displayCount = 15;
+                const res = await fetch('/api/analyze', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(window.filteredItems)
+                });
+                const newStats = await res.json();
+                const filtered = { results: { items: window.filteredItems, found: window.filteredItems.length }, stats: newStats };
+                renderResults(filtered);
+            } catch (err) {
+                const filtered = { results: { items: window.filteredItems, found: window.filteredItems.length }, stats: window.allData.stats };
+                renderResults(filtered);
+            } finally {
+                loadingEl.classList.add('hidden');
+            }
+        }
+
+        async function searchVacancies() {
+            const formData = new FormData(document.getElementById('searchForm'));
+            document.getElementById('loading').classList.remove('hidden');
+            document.getElementById('results').classList.add('hidden');
+            document.getElementById('error').classList.add('hidden');
+
+            try {
+                const res = await fetch('/search', { method: 'POST', body: formData });
+                const data = await res.json();
+                if (data.error) { showError(data.error); return; }
+                window.allData = data;
+                window.filteredItems = null;
+                window.currentItems = data.results.items;
+                window.displayCount = 15;
+                applyTitleFilter();
+                document.getElementById('exportBtn').classList.remove('hidden');
+            } catch (err) {
+                showError('Ошибка: ' + err.message);
+            } finally {
+                document.getElementById('loading').classList.add('hidden');
+            }
+        }
+
+        function showError(msg) {
+            const el = document.getElementById('error');
+            el.textContent = msg;
+            el.classList.remove('hidden');
+        }
+
+        function destroyCharts() {
+            Object.values(charts).forEach(c => c.destroy());
+            charts = {};
+        }
+
+        function renderResults(data) {
+            const { results, stats } = data;
+            document.getElementById('results').classList.remove('hidden');
+            document.getElementById('totalCount').textContent = results.items.length;
+            document.getElementById('avgResponses').textContent = stats.responses_median ? `~${stats.responses_median} откликов/вак. (медиана)` : '';
+
+            destroyCharts();
+            renderSkillsChart(stats.top_skills);
+            renderTitleKeywordsChart(stats.top_title_keywords);
+            renderPieChart('experienceChart', stats.experience_distribution);
+            renderPieChart('scheduleChart', stats.schedule_distribution);
+            renderSalaryChart(stats.salary_chart);
+            renderTandemsChart(stats.top_tandems);
+            renderVacancies(results.items);
+        }
+
+        function renderSkillsChart(skills) {
+            const container = document.getElementById('skillsChart');
+            container.innerHTML = '';
+            if (!skills || !skills.length) { container.innerHTML = '<p class="text-gray-400 text-xs">Нет данных</p>'; return; }
+            const max = skills[0].count;
+            skills.forEach(s => {
+                const pct = (s.count / max) * 100;
+                container.innerHTML += `
+                    <div>
+                        <div class="flex justify-between text-xs"><span>${s.skill}</span><span class="text-gray-400">${s.count}</span></div>
+                        <div class="w-full bg-gray-200 rounded-full h-1.5"><div class="bg-blue-600 h-1.5 rounded-full" style="width:${pct}%"></div></div>
+                    </div>`;
+            });
+        }
+
+        function renderTitleKeywordsChart(keywords) {
+            const container = document.getElementById('titleKeywordsChart');
+            container.innerHTML = '';
+            if (!keywords || !keywords.length) { container.innerHTML = '<p class="text-gray-400 text-xs">Нет данных</p>'; return; }
+            const max = keywords[0].count;
+            keywords.forEach(k => {
+                const pct = (k.count / max) * 100;
+                container.innerHTML += `
+                    <div>
+                        <div class="flex justify-between text-xs"><span>${k.keyword}</span><span class="text-gray-400">${k.count}</span></div>
+                        <div class="w-full bg-gray-200 rounded-full h-1.5"><div class="bg-amber-500 h-1.5 rounded-full" style="width:${pct}%"></div></div>
+                    </div>`;
+            });
+        }
+
+        function renderPieChart(id, data) {
+            const ctx = document.getElementById(id).getContext('2d');
+            charts[id] = new Chart(ctx, {
+                type: 'pie',
+                data: {
+                    labels: Object.keys(data),
+                    datasets: [{ data: Object.values(data), backgroundColor: ['#3B82F6','#10B981','#F59E0B','#EF4444','#8B5CF6','#EC4899','#14B8A6'] }]
+                },
+                options: { responsive: true, maintainAspectRatio: true, plugins: { legend: { position: 'bottom', labels: { boxWidth: 10, font: { size: 10 } } } } }
+            });
+        }
+
+        function renderSalaryChart(data) {
+            const ctx = document.getElementById('salaryChart').getContext('2d');
+            charts['salary'] = new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: data.map(d => d.label),
+                    datasets: [{
+                        data: data.map(d => d.value),
+                        backgroundColor: ['#EF4444', '#3B82F6', '#10B981'],
+                        borderRadius: 6,
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: true,
+                    indexAxis: 'y',
+                    plugins: { legend: { display: false } },
+                    scales: {
+                        x: { beginAtZero: true, ticks: { callback: v => (v/1000) + 'k' } }
+                    }
+                }
+            });
+        }
+
+        function renderTandemsChart(tandems) {
+            const container = document.getElementById('tandemsChart');
+            container.innerHTML = '';
+            if (!tandems || !tandems.length) { container.innerHTML = '<p class="text-gray-400 text-xs">Нет данных</p>'; return; }
+            const max = tandems[0].count;
+            tandems.forEach(t => {
+                const pct = (t.count / max) * 100;
+                container.innerHTML += `
+                    <div>
+                        <div class="flex justify-between text-xs"><span>${t.pair}</span><span class="text-gray-400">${t.count}</span></div>
+                        <div class="w-full bg-gray-200 rounded-full h-1.5"><div class="bg-purple-500 h-1.5 rounded-full" style="width:${pct}%"></div></div>
+                    </div>`;
+            });
+        }
+
+        function renderVacancies(vacancies) {
+            const container = document.getElementById('vacanciesList');
+            container.innerHTML = '';
+            const toShow = vacancies.slice(0, window.displayCount);
+            toShow.forEach(v => {
+                let salary = 'Не указана';
+                let salaryConverted = '';
+                if (v.salary) {
+                    const p = [];
+                    const cur = v.salary.currency || 'RUR';
+                    if (v.salary.from) p.push(`от ${Number(v.salary.from).toLocaleString()}`);
+                    if (v.salary.to) p.push(`до ${Number(v.salary.to).toLocaleString()}`);
+                    if (p.length) salary = p.join(' ') + ' ' + cur;
+                    if (v.salary._is_foreign && v.salary._converted_rub) {
+                        salaryConverted = `<span class="text-gray-400 text-xs">(~${Number(v.salary._converted_rub).toLocaleString()} руб.)</span>`;
+                    }
+                }
+                const skills = (v.key_skills || []).slice(0, 5).map(s => `<span class="bg-blue-100 text-blue-800 text-xs px-1.5 py-0.5 rounded">${s}</span>`).join(' ');
+                const responses = v.responses_count != null ? `<span class="text-gray-400 text-xs ml-2">~${v.responses_count} откл.</span>` : '';
+                container.innerHTML += `
+                    <div class="border rounded p-3 hover:shadow text-sm">
+                        <div class="flex justify-between items-start gap-2">
+                            <div class="min-w-0">
+                                <a href="${v.url}" target="_blank" class="font-medium text-blue-600 hover:underline truncate block">${v.name}</a>
+                                <p class="text-gray-500 text-xs">${v.employer} | ${v.area}</p>
+                            </div>
+                            <div class="text-right whitespace-nowrap">
+                                <p class="text-green-600 font-medium">${salary} ${salaryConverted}</p>
+                                <p class="text-gray-400 text-xs">${v.experience}${responses}</p>
+                            </div>
+                        </div>
+                        <div class="mt-1 text-xs text-gray-400">${v.schedule}</div>
+                        ${skills ? `<div class="mt-1 flex flex-wrap gap-1">${skills}</div>` : ''}
+                        <button class="mt-2 text-xs text-blue-600 hover:underline" onclick='showVacancy(${JSON.stringify(v).replace(/'/g, "&#39;")})'>Подробнее</button>
+                    </div>`;
+            });
+            if (window.displayCount < vacancies.length) {
+                container.innerHTML += `
+                    <div id="loadMoreSentinel" class="text-center py-4">
+                        <button id="loadMoreBtn" onclick="loadMore()" class="text-sm text-blue-600 hover:underline">Загрузить ещё (${Math.min(25, vacancies.length - window.displayCount)} из ${vacancies.length - window.displayCount} оставшихся)</button>
+                    </div>`;
+            }
+        }
+
+        function loadMore() {
+            window.displayCount += 25;
+            renderVacancies(window.currentItems);
+        }
+
+        function showVacancy(v) {
+            const modal = document.getElementById('vacancyModal');
+            document.getElementById('modalTitle').textContent = v.name;
+            document.getElementById('modalEmployer').textContent = v.employer + ' | ' + v.area;
+
+            let salary = 'Не указана';
+            if (v.salary) {
+                const p = [];
+                const cur = v.salary.currency || 'RUR';
+                if (v.salary.from) p.push('от ' + Number(v.salary.from).toLocaleString());
+                if (v.salary.to) p.push('до ' + Number(v.salary.to).toLocaleString());
+                if (p.length) salary = p.join(' ') + ' ' + cur;
+                if (v.salary._is_foreign && v.salary._converted_rub) {
+                    salary += ' (~' + Number(v.salary._converted_rub).toLocaleString() + ' руб.)';
+                }
+            }
+            document.getElementById('modalSalary').textContent = salary;
+            document.getElementById('modalExperience').textContent = v.experience;
+            document.getElementById('modalSchedule').textContent = v.schedule;
+            document.getElementById('modalResponses').textContent = v.responses_count != null ? '~' + v.responses_count + ' откликов' : '';
+
+            const skillsContainer = document.getElementById('modalSkills');
+            skillsContainer.innerHTML = '';
+            if (v.key_skills && v.key_skills.length) {
+                v.key_skills.forEach(s => {
+                    skillsContainer.innerHTML += '<span class="bg-blue-100 text-blue-800 text-sm px-2 py-1 rounded">' + s + '</span>';
+                });
+            } else {
+                skillsContainer.innerHTML = '<span class="text-gray-400 text-sm">Навыки не указаны</span>';
+            }
+
+            document.getElementById('modalLink').href = v.url;
+
+            const descEl = document.getElementById('modalDescription');
+            if (v.description) {
+                descEl.innerHTML = v.description;
+            } else {
+                descEl.innerHTML = '<em class="text-gray-400">Загрузка описания...</em>';
+                fetch('/api/vacancy/' + v.id + '/description')
+                    .then(r => r.json())
+                    .then(data => {
+                        descEl.innerHTML = data.description || '<em class="text-gray-400">Описание отсутствует</em>';
+                    })
+                    .catch(() => {
+                        descEl.innerHTML = '<em class="text-gray-400">Не удалось загрузить описание</em>';
+                    });
+            }
+
+            modal.classList.remove('hidden');
+        }
+
+        function closeModal() {
+            document.getElementById('vacancyModal').classList.add('hidden');
+        }
+
+    </script>
+
+    <div id="vacancyModal" class="hidden fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4" onclick="if(event.target===this)closeModal()">
+        <div class="bg-white rounded-lg shadow-xl max-w-lg w-full max-h-[80vh] overflow-y-auto p-6">
+            <div class="flex justify-between items-start mb-4">
+                <div>
+                    <h2 id="modalTitle" class="text-lg font-bold text-gray-800"></h2>
+                    <p id="modalEmployer" class="text-sm text-gray-500"></p>
+                </div>
+                <button onclick="closeModal()" class="text-gray-400 hover:text-gray-600 text-xl">&times;</button>
+            </div>
+            <div class="space-y-3 text-sm">
+                <div><span class="font-medium">Зарплата:</span> <span id="modalSalary" class="text-green-600"></span></div>
+                <div><span class="font-medium">Опыт:</span> <span id="modalExperience"></span></div>
+                <div><span class="font-medium">График:</span> <span id="modalSchedule"></span></div>
+                <div><span class="font-medium">Отклики:</span> <span id="modalResponses" class="text-gray-500"></span></div>
+                <div>
+                    <span class="font-medium">Ключевые навыки:</span>
+                    <div id="modalSkills" class="flex flex-wrap gap-1.5 mt-1.5"></div>
+                </div>
+                <div>
+                    <span class="font-medium">Описание:</span>
+                    <div id="modalDescription" class="mt-1.5 text-gray-700 text-xs leading-relaxed max-h-60 overflow-y-auto border rounded p-3 bg-gray-50"></div>
+                </div>
+            </div>
+            <div class="mt-5">
+                <a id="modalLink" href="#" target="_blank" class="inline-block bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700 text-sm">Открыть на HH.ru</a>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
