@@ -131,12 +131,18 @@ class HHClient:
 
         try:
             scraped_map = self._scrape_search_page(text, area, schedule, title_only, page_limit)
-            scraped_map = {str(k): v for k, v in scraped_map.items()}
+            scraped_by_name = {}
+            for sv in scraped_map.values():
+                name = (sv.get("name") or "").lower().strip()
+                if name:
+                    scraped_by_name[name] = sv
             for v in all_results:
-                vid = v.get("id")
-                if vid and vid in scraped_map:
-                    sv = scraped_map[vid]
-                    rc = sv.get("responsesCount")
+                name = (v.get("name") or "").lower().strip()
+                if name and name in scraped_by_name:
+                    sv = scraped_by_name[name]
+                    rc = sv.get("totalResponsesCount")
+                    if rc is None:
+                        rc = sv.get("responsesCount")
                     if rc is not None:
                         v["responsesCount"] = rc
         except Exception:
@@ -607,6 +613,14 @@ class HHClient:
             else:
                 schedule_name = "Не указан"
 
+            desc_text = ((v.get("description") or "") + " " + (v.get("name") or "")).lower()
+            if any(w in desc_text for w in ["удалён", "удален", "remote"]):
+                schedule_name = "Удалённо"
+            elif any(w in desc_text for w in ["гибрид", "hybrid"]):
+                schedule_name = "Гибрид"
+            elif schedule_name == "Полный день" or schedule_name == "Не указан":
+                schedule_name = "Офис"
+
             key_skills = v.get("key_skills", [])
             if key_skills and isinstance(key_skills[0], dict):
                 key_skills = [s.get("name", "") for s in key_skills]
@@ -618,11 +632,13 @@ class HHClient:
 
             vacancy_id = v.get("id") or v.get("vacancyId")
             url = v.get("alternate_url") or f"https://hh.ru/vacancy/{vacancy_id}"
-            responses_count = v.get("responsesCount")
+            responses_count = v.get("totalResponsesCount")
             if responses_count is None:
-                responses_count = v.get("totalResponsesCount")
+                responses_count = v.get("responsesCount")
             if responses_count is None:
                 responses_count = v.get("responses_count")
+            if responses_count == 0:
+                responses_count = None
 
             results.append({
                 "id": vacancy_id,

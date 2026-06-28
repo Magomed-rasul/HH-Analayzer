@@ -209,7 +209,15 @@ def analyze_vacancies(vacancies: List[Dict[str, Any]]) -> Dict[str, Any]:
         all_title_keywords_per_vacancy.append(vacancy_kw)
 
         experience_counter[v.get("experience", "Не указан")] += 1
-        schedule_counter[v.get("schedule", "Не указан")] += 1
+        schedule_raw = v.get("schedule", "Не указан")
+        schedule_map = {
+            "Удалённо": "Удалённо",
+            "Полный день": "Офис",
+            "Гибкий график": "Гибрид",
+            "Сменный график": "Гибрид",
+            "Вахтовый метод": "Гибрид",
+        }
+        schedule_counter[schedule_map.get(schedule_raw, schedule_raw)] += 1
 
         salary = v.get("salary")
         if salary:
@@ -221,7 +229,7 @@ def analyze_vacancies(vacancies: List[Dict[str, Any]]) -> Dict[str, Any]:
             salary["_is_foreign"] = is_foreign
 
         responses = v.get("responses_count")
-        if responses is not None:
+        if responses is not None and responses > 0:
             responses_list.append(responses)
 
     flat_skills = [s for sublist in all_skills_per_vacancy for s in sublist]
@@ -242,6 +250,37 @@ def analyze_vacancies(vacancies: List[Dict[str, Any]]) -> Dict[str, Any]:
             {"label": "Макс.", "value": round(max(salary_values))},
         ]
 
+    responses_stats = None
+    if responses_list:
+        def _bucket_round(val):
+            if val > 100:
+                return round(val / 50) * 50
+            return round(val / 10) * 10
+
+        min_val = min(responses_list)
+        max_val = max(responses_list)
+        step = (max_val - min_val) / 5 if max_val > min_val else 1
+        buckets = {}
+        for i in range(5):
+            lo = _bucket_round(min_val + i * step)
+            hi = _bucket_round(min_val + (i + 1) * step) if i < 4 else _bucket_round(max_val)
+            buckets[f"{lo}-{hi}"] = 0
+        for r in responses_list:
+            for i in range(5):
+                lo = _bucket_round(min_val + i * step)
+                hi = _bucket_round(min_val + (i + 1) * step) if i < 4 else _bucket_round(max_val)
+                if lo <= r <= hi or (i == 4 and r == max_val):
+                    buckets[f"{lo}-{hi}"] += 1
+                    break
+        responses_stats = {
+            "median": round(_median(responses_list)),
+            "avg": round(sum(responses_list) / len(responses_list)),
+            "min": min(responses_list),
+            "max": max(responses_list),
+            "count": len(responses_list),
+            "distribution": buckets,
+        }
+
     return {
         "total_vacancies": len(vacancies),
         "top_skills": [{"skill": s, "count": c} for s, c in top_skills],
@@ -251,4 +290,5 @@ def analyze_vacancies(vacancies: List[Dict[str, Any]]) -> Dict[str, Any]:
         "schedule_distribution": dict(schedule_counter),
         "salary_chart": salary_chart,
         "responses_median": round(_median(responses_list)) if responses_list else 0,
+        "responses_stats": responses_stats,
     }
