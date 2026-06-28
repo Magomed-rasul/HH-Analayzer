@@ -63,6 +63,14 @@
     <div class="container mx-auto px-4 py-6 max-w-6xl">
         <div class="flex justify-between items-center mb-6">
             <h1 class="text-2xl font-bold text-gray-800">HH Analyzer</h1>
+            <div class="flex items-center gap-2">
+                <span id="apiLabel" class="text-sm text-gray-500 min-w-[65px] inline-block text-right">Scraping</span>
+                <label class="relative inline-flex items-center cursor-pointer">
+                    <input type="checkbox" id="apiToggle" class="sr-only peer" onchange="toggleApi()">
+                    <div class="w-11 h-6 bg-gray-300 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+                </label>
+                <span id="apiStatus" class="text-xs text-gray-400 min-w-[70px] inline-block"></span>
+            </div>
         </div>
 
         <div class="bg-white rounded-lg shadow p-4 mb-4">
@@ -107,6 +115,9 @@
             <p class="text-sm text-gray-500 mt-2">Поиск вакансий может занять до 2 минут</p>
         </div>
         <div id="error" class="hidden bg-red-100 border border-red-400 text-red-700 px-4 py-2 rounded mb-4 text-sm"></div>
+        <div id="scrapeNotice" class="hidden bg-amber-50 border border-amber-300 text-amber-700 px-4 py-2 rounded mb-4 text-sm">
+            Без API-токена загружается до ~60 вакансий. Для полного количества подключите HH API в настройках.
+        </div>
 
         <div id="results" class="hidden">
             <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mb-4">
@@ -134,8 +145,8 @@
                     <div class="chart-container"><canvas id="salaryChart"></canvas></div>
                 </div>
                 <div class="bg-white rounded-lg shadow p-4">
-                    <h3 class="text-sm font-semibold mb-2">Частые тандемы технологий</h3>
-                    <div id="tandemsChart" class="space-y-1.5" style="max-height: 220px; overflow-y: auto;"></div>
+                    <h3 class="text-sm font-semibold mb-2">Топ технологий</h3>
+                    <div id="techStacksChart" class="space-y-1.5" style="max-height: 220px; overflow-y: auto;"></div>
                 </div>
             </div>
 
@@ -151,6 +162,48 @@
         window.allData = null;
         window.displayCount = 15;
         window.currentItems = [];
+        window.selectedTech = null;
+
+        async function loadApiStatus() {
+            try {
+                const res = await fetch('/api/settings');
+                const data = await res.json();
+                updateApiUI(data.has_api);
+            } catch (e) {}
+        }
+
+        function updateApiUI(hasApi) {
+            const toggle = document.getElementById('apiToggle');
+            const label = document.getElementById('apiLabel');
+            const status = document.getElementById('apiStatus');
+            toggle.checked = hasApi;
+            label.textContent = hasApi ? 'API' : 'Scraping';
+            label.className = hasApi ? 'text-sm text-blue-600 font-medium' : 'text-sm text-gray-500';
+            status.textContent = hasApi ? 'Подключено' : '';
+            status.className = hasApi ? 'text-xs text-green-500' : 'text-xs text-gray-400';
+        }
+
+        async function toggleApi() {
+            const toggle = document.getElementById('apiToggle');
+            const status = document.getElementById('apiStatus');
+            status.textContent = '...';
+            try {
+                if (toggle.checked) {
+                    const res = await fetch('/api/settings/connect', { method: 'POST' });
+                    const data = await res.json();
+                    updateApiUI(data.has_api);
+                } else {
+                    const res = await fetch('/api/settings/disconnect', { method: 'POST' });
+                    const data = await res.json();
+                    updateApiUI(data.has_api);
+                }
+            } catch (e) {
+                toggle.checked = !toggle.checked;
+                status.textContent = 'Ошибка';
+            }
+        }
+
+        loadApiStatus();
 
         document.getElementById('searchForm').addEventListener('submit', async (e) => {
             e.preventDefault();
@@ -161,31 +214,28 @@
             if (window.allData) applyTitleFilter();
         });
 
-        document.getElementById('exportBtn').addEventListener('click', () => {
+        document.getElementById('exportBtn').addEventListener('click', async () => {
             if (!window.allData) return;
             const btn = document.getElementById('exportBtn');
             const originalText = btn.textContent;
             btn.disabled = true;
             btn.textContent = 'Загрузка...';
             try {
-                const items = window.filteredItems || window.allData.results.items;
-                const rows = [['ID','Название','Компания','Город','Опыт','График','Зарплата от','Зарплата до','Навыки','Описание','Ссылка']];
-                items.forEach(v => {
-                    const s = v.salary || {};
-                    rows.push([
-                        v.id, v.name, v.employer, v.area, v.experience, v.schedule,
-                        s.from || '', s.to || '',
-                        (v.key_skills || []).join(', '),
-                        (v.description || '').replace(/<[^>]*>/g, ''),
-                        v.url
-                    ]);
-                });
-                const csv = '\uFEFF' + rows.map(r => r.map(c => '"' + String(c).replace(/"/g, '""') + '"').join(',')).join('\n');
-                const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+                const formData = new FormData();
+                formData.set('text', document.getElementById('searchText').value);
+                const areaSelect = document.querySelector('select[name="area"]');
+                const scheduleSelect = document.querySelector('select[name="schedule"]');
+                formData.set('area', areaSelect ? areaSelect.value : '');
+                formData.set('schedule', scheduleSelect ? scheduleSelect.value : '');
+                formData.set('title_only', document.getElementById('titleOnly').checked ? 'true' : 'false');
+                const res = await fetch('/export', { method: 'POST', body: formData });
+                const blob = await res.blob();
                 const a = document.createElement('a');
                 a.href = URL.createObjectURL(blob);
                 a.download = (document.getElementById('searchText').value.trim() || 'hh_vacancies') + '.csv';
                 a.click();
+            } catch (err) {
+                showError('Ошибка экспорта: ' + err.message);
             } finally {
                 btn.disabled = false;
                 btn.textContent = originalText;
@@ -194,32 +244,21 @@
 
         async function applyTitleFilter() {
             if (!window.allData) return;
-            const loadingEl = document.getElementById('loading');
-            loadingEl.classList.remove('hidden');
-            try {
-                const text = document.getElementById('searchText').value.toLowerCase();
-                const titleOnly = document.getElementById('titleOnly').checked;
-                if (titleOnly) {
-                    window.filteredItems = window.allData.results.items.filter(v => v.name.toLowerCase().includes(text));
-                } else {
-                    window.filteredItems = window.allData.results.items;
-                }
-                window.currentItems = window.filteredItems;
-                window.displayCount = 15;
-                const res = await fetch('/api/analyze', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(window.filteredItems)
-                });
-                const newStats = await res.json();
-                const filtered = { results: { items: window.filteredItems, found: window.filteredItems.length }, stats: newStats };
-                renderResults(filtered);
-            } catch (err) {
-                const filtered = { results: { items: window.filteredItems, found: window.filteredItems.length }, stats: window.allData.stats };
-                renderResults(filtered);
-            } finally {
-                loadingEl.classList.add('hidden');
+            const text = document.getElementById('searchText').value.toLowerCase();
+            const titleOnly = document.getElementById('titleOnly').checked;
+            if (titleOnly) {
+                window.currentItems = window.allData.results.items.filter(v => v.name.toLowerCase().includes(text));
+            } else {
+                window.currentItems = window.allData.results.items;
             }
+            window.displayCount = 15;
+            const res = await fetch('/api/analyze', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(window.currentItems)
+            });
+            const stats = await res.json();
+            renderResults({ results: { items: window.currentItems, found: window.currentItems.length }, stats });
         }
 
         async function searchVacancies() {
@@ -227,17 +266,23 @@
             document.getElementById('loading').classList.remove('hidden');
             document.getElementById('results').classList.add('hidden');
             document.getElementById('error').classList.add('hidden');
+            document.getElementById('scrapeNotice').classList.add('hidden');
+            window.selectedTech = null;
 
             try {
                 const res = await fetch('/search', { method: 'POST', body: formData });
                 const data = await res.json();
                 if (data.error) { showError(data.error); return; }
                 window.allData = data;
-                window.filteredItems = null;
                 window.currentItems = data.results.items;
                 window.displayCount = 15;
                 applyTitleFilter();
                 document.getElementById('exportBtn').classList.remove('hidden');
+                const settingsRes = await fetch('/api/settings');
+                const settings = await settingsRes.json();
+                if (!settings.has_api) {
+                    document.getElementById('scrapeNotice').classList.remove('hidden');
+                }
             } catch (err) {
                 showError('Ошибка: ' + err.message);
             } finally {
@@ -261,6 +306,7 @@
             document.getElementById('results').classList.remove('hidden');
             document.getElementById('totalCount').textContent = results.items.length;
             document.getElementById('avgResponses').textContent = stats.responses_median ? `~${stats.responses_median} откликов/вак. (медиана)` : '';
+            if (window.allData) window.allData.stats = stats;
 
             destroyCharts();
             renderSkillsChart(stats.top_skills);
@@ -268,8 +314,9 @@
             renderPieChart('experienceChart', stats.experience_distribution);
             renderPieChart('scheduleChart', stats.schedule_distribution);
             renderSalaryChart(stats.salary_chart);
-            renderTandemsChart(stats.top_tandems);
+            renderTechStacksChart(stats.top_tech_stacks);
             renderVacancies(results.items);
+            loadResponses();
         }
 
         function renderSkillsChart(skills) {
@@ -338,19 +385,52 @@
             });
         }
 
-        function renderTandemsChart(tandems) {
-            const container = document.getElementById('tandemsChart');
+        function renderTechStacksChart(stacks) {
+            const container = document.getElementById('techStacksChart');
             container.innerHTML = '';
-            if (!tandems || !tandems.length) { container.innerHTML = '<p class="text-gray-400 text-xs">Нет данных</p>'; return; }
-            const max = tandems[0].count;
-            tandems.forEach(t => {
-                const pct = (t.count / max) * 100;
+            if (!stacks || !stacks.length) { container.innerHTML = '<p class="text-gray-400 text-xs">Нет данных</p>'; return; }
+            const max = stacks[0].count;
+            stacks.forEach(s => {
+                const pct = (s.count / max) * 100;
+                const isSelected = window.selectedTech === s.stack;
+                const bg = isSelected ? 'bg-purple-700' : 'bg-purple-500';
+                const cursor = 'cursor-pointer';
+                const opacity = isSelected ? 'opacity-100' : 'opacity-80 hover:opacity-100';
                 container.innerHTML += `
-                    <div>
-                        <div class="flex justify-between text-xs"><span>${t.pair}</span><span class="text-gray-400">${t.count}</span></div>
-                        <div class="w-full bg-gray-200 rounded-full h-1.5"><div class="bg-purple-500 h-1.5 rounded-full" style="width:${pct}%"></div></div>
+                    <div class="${cursor} ${opacity}" onclick="filterByTech('${s.stack.replace(/'/g, "\\'")}')">
+                        <div class="flex justify-between text-xs"><span class="${isSelected ? 'font-bold text-purple-800' : ''}">${s.stack}</span><span class="text-gray-400">${s.count}</span></div>
+                        <div class="w-full bg-gray-200 rounded-full h-1.5"><div class="${bg} h-1.5 rounded-full" style="width:${pct}%"></div></div>
                     </div>`;
             });
+        }
+
+        function filterByTech(tech) {
+            if (window.selectedTech === tech) {
+                window.selectedTech = null;
+            } else {
+                window.selectedTech = tech;
+            }
+            if (!window.allData) return;
+            if (window.selectedTech) {
+                const lower = window.selectedTech.toLowerCase();
+                window.currentItems = window.allData.results.items.filter(v => {
+                    const skills = (v.key_skills || []).map(s => s.toLowerCase()).join(' ');
+                    const desc = (v.description || '').toLowerCase();
+                    const name = (v.name || '').toLowerCase();
+                    const all = skills + ' ' + desc + ' ' + name;
+                    if (lower.includes(' + ')) {
+                        const parts = lower.split(' + ').map(p => p.trim());
+                        return parts.every(p => all.includes(p));
+                    }
+                    return all.includes(lower);
+                });
+            } else {
+                window.currentItems = window.allData.results.items;
+            }
+            window.displayCount = 15;
+            document.getElementById('totalCount').textContent = window.currentItems.length;
+            renderVacancies(window.currentItems);
+            renderTechStacksChart(window.allData.stats.top_tech_stacks);
         }
 
         function renderVacancies(vacancies) {
@@ -371,9 +451,9 @@
                     }
                 }
                 const skills = (v.key_skills || []).slice(0, 5).map(s => `<span class="bg-blue-100 text-blue-800 text-xs px-1.5 py-0.5 rounded">${s}</span>`).join(' ');
-                const responses = v.responses_count != null ? `<span class="text-gray-400 text-xs ml-2">~${v.responses_count} откл.</span>` : '';
+                const responses = v.responses_count != null ? `<span class="responses-badge text-gray-400 text-xs ml-2">~${v.responses_count} откл.</span>` : `<span class="responses-badge text-gray-300 text-xs ml-2">—</span>`;
                 container.innerHTML += `
-                    <div class="vacancy-card border rounded p-3 hover:shadow text-sm" style="animation-delay: ${i * 0.04}s">
+                    <div class="vacancy-card border rounded p-3 hover:shadow text-sm" data-vid="${v.id}" style="animation-delay: ${i * 0.04}s">
                         <div class="flex justify-between items-start gap-2">
                             <div class="min-w-0">
                                 <a href="${v.url}" target="_blank" class="font-medium text-blue-600 hover:underline truncate block">${v.name}</a>
@@ -400,6 +480,30 @@
         function loadMore() {
             window.displayCount += 25;
             renderVacancies(window.currentItems);
+            loadResponses();
+        }
+
+        async function loadResponses() {
+            const without = window.currentItems.filter(v => v.responses_count == null);
+            if (!without.length) return;
+            const withIds = window.currentItems.filter(v => v.responses_count != null).map(v => v.id);
+            const params = new URLSearchParams({
+                text: document.getElementById('searchText').value,
+                area: document.getElementById('searchArea').value,
+                schedule: document.getElementById('searchSchedule').value,
+                title_only: document.getElementById('titleOnly').checked,
+                exclude_ids: withIds.join(',')
+            });
+            try {
+                const res = await fetch(`/api/responses?${params}`);
+                const data = await res.json();
+                Object.entries(data).forEach(([id, count]) => {
+                    const item = window.currentItems.find(v => v.id == id);
+                    if (item) item.responses_count = count;
+                    const card = document.querySelector(`[data-vid="${id}"] .responses-badge`);
+                    if (card) card.textContent = `~${count} откл.`;
+                });
+            } catch (e) {}
         }
 
         function showVacancy(v) {

@@ -58,7 +58,13 @@ class HHClient:
         self.access_token = None
 
         if client_id and client_secret:
-            self._get_token(client_id, client_secret)
+            import os
+            cached_token = os.environ.get("HH_ACCESS_TOKEN")
+            if cached_token:
+                self.access_token = cached_token
+                self.session.headers["Authorization"] = f"Bearer {cached_token}"
+            else:
+                self._get_token(client_id, client_secret)
 
     def _get_token(self, client_id: str, client_secret: str):
         response = self.session.post(f"{HH_API_BASE}/token", data={
@@ -69,6 +75,15 @@ class HHClient:
         if response.status_code == 200:
             self.access_token = response.json().get("access_token")
             self.session.headers["Authorization"] = f"Bearer {self.access_token}"
+            import os
+            env_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env")
+            if os.path.exists(env_path):
+                lines = []
+                with open(env_path, "r") as f:
+                    lines = [l for l in f.readlines() if not l.startswith("HH_ACCESS_TOKEN")]
+                lines.append(f"HH_ACCESS_TOKEN={self.access_token}")
+                with open(env_path, "w") as f:
+                    f.write("".join(lines))
 
     def search_vacancies(
         self,
@@ -76,10 +91,11 @@ class HHClient:
         area: Optional[str] = None,
         schedule: Optional[str] = None,
         page_limit: int = 1,
+        title_only: bool = False,
     ) -> dict:
         if self.access_token:
-            return self._search_api(text, area, schedule, page_limit)
-        return self._search_scrape(text, area, schedule, page_limit)
+            return self._search_api(text, area, schedule, page_limit, title_only)
+        return self._search_scrape(text, area, schedule, page_limit, title_only)
 
     def _search_api(
         self,
@@ -87,6 +103,7 @@ class HHClient:
         area: Optional[str] = None,
         schedule: Optional[str] = None,
         page_limit: int = 1,
+        title_only: bool = False,
     ) -> dict:
         params = {
             "text": text,
@@ -99,6 +116,8 @@ class HHClient:
             params["area"] = area
         if schedule:
             params["schedule"] = schedule
+        if title_only:
+            params["search_field"] = "name"
 
         all_results = []
         for page in range(page_limit):
@@ -110,13 +129,107 @@ class HHClient:
             if page >= data.get("pages", 1) - 1:
                 break
 
-        all_results = self._enrich_with_api_details(all_results)
+        try:
+            scraped_map = self._scrape_search_page(text, area, schedule, title_only, page_limit)
+            scraped_map = {str(k): v for k, v in scraped_map.items()}
+            for v in all_results:
+                vid = v.get("id")
+                if vid and vid in scraped_map:
+                    sv = scraped_map[vid]
+                    rc = sv.get("responsesCount")
+                    if rc is not None:
+                        v["responsesCount"] = rc
+        except Exception:
+            pass
+
+        need_enrich = [v for v in all_results[:50] if not v.get("description") and v.get("id")]
+        if need_enrich:
+            with ThreadPoolExecutor(max_workers=8) as executor:
+                future_to_v = {executor.submit(self._fetch_vacancy_detail, v["id"]): v for v in need_enrich}
+                for future in as_completed(future_to_v):
+                    v = future_to_v[future]
+                    try:
+                        detail = future.result()
+                        if detail:
+                            if detail.get("description"):
+                                v["description"] = detail["description"]
+                            if detail.get("key_skills"):
+                                v["key_skills"] = [s.get("name", "") for s in detail.get("key_skills", []) if isinstance(s, dict)]
+                    except Exception:
+                        pass
+
+        need_meta = [v for v in all_results[:50] if not v.get("schedule")]
+        if need_meta:
+            with ThreadPoolExecutor(max_workers=4) as executor:
+                future_to_v = {executor.submit(self._fetch_vacancy_meta, v["id"]): v for v in need_meta}
+                for future in as_completed(future_to_v):
+                    v = future_to_v[future]
+                    try:
+                        meta = future.result()
+                        if meta:
+                            if meta.get("schedule"):
+                                v["schedule"] = meta["schedule"]
+                    except Exception:
+                        pass
+
         return self._format_results(all_results)
+
+    def _scrape_search_page(self, text, area=None, schedule=None, title_only=False, page_limit=5):
+        import urllib.parse
+        scraped_map = {}
+        try:
+            params = {"text": text, "order_by": "publication_time", "per_page": 50}
+            if area:
+                params["area"] = area
+            if schedule:
+                params["schedule"] = schedule
+            if title_only:
+                params["search_field"] = "name"
+            for pg in range(1, page_limit + 1):
+                params["page"] = pg
+                qs = urllib.parse.urlencode(params)
+                html = self.scrape_session.get(f"https://hh.ru/search/vacancy?{qs}", timeout=15).text
+                if self._is_captcha_page(html):
+                    break
+                for sv in self._parse_scraped_page(html):
+                    vid = sv.get("vacancyId")
+                    if vid:
+                        scraped_map[vid] = sv
+                if pg < page_limit:
+                    time.sleep(2)
+        except Exception:
+            pass
+        return scraped_map
+
+    def _scrape_search_page_sorted(self, text, area=None, schedule=None, title_only=False, sort="relevance", page_limit=5):
+        import urllib.parse
+        scraped_map = {}
+        try:
+            params = {"text": text, "order_by": sort, "per_page": 50}
+            if area:
+                params["area"] = area
+            if schedule:
+                params["schedule"] = schedule
+            if title_only:
+                params["search_field"] = "name"
+            for pg in range(1, page_limit + 1):
+                params["page"] = pg
+                qs = urllib.parse.urlencode(params)
+                html = self.scrape_session.get(f"https://hh.ru/search/vacancy?{qs}", timeout=15).text
+                if self._is_captcha_page(html):
+                    break
+                for sv in self._parse_scraped_page(html):
+                    vid = sv.get("vacancyId")
+                    if vid:
+                        scraped_map[vid] = sv
+        except Exception:
+            pass
+        return scraped_map
 
     def _fetch_vacancy_detail(self, vacancy_id) -> dict:
         try:
-            _rate_limit(1.0)
-            resp = self.session.get(f"{HH_API_BASE}/vacancies/{vacancy_id}", timeout=10)
+            _rate_limit(0.05)
+            resp = self.session.get(f"{HH_API_BASE}/vacancies/{vacancy_id}", timeout=3)
             if resp.status_code == 200:
                 return resp.json()
         except Exception:
@@ -127,11 +240,11 @@ class HHClient:
         ids = []
         for v in vacancies:
             vid = v.get("id")
-            if vid:
+            if vid and not v.get("description"):
                 ids.append(vid)
 
         details_map = {}
-        with ThreadPoolExecutor(max_workers=3) as executor:
+        with ThreadPoolExecutor(max_workers=8) as executor:
             future_to_id = {executor.submit(self._fetch_vacancy_detail, vid): vid for vid in ids}
             for future in as_completed(future_to_id):
                 vid = future_to_id[future]
@@ -204,7 +317,7 @@ class HHClient:
     def _fetch_vacancy_description(self, vacancy_id) -> str:
         for attempt in range(2):
             try:
-                _rate_limit(3.0)
+                _rate_limit(0.5)
                 resp = self.scrape_session.get(f"https://hh.ru/vacancy/{vacancy_id}", timeout=15)
                 html = resp.text
                 if self._is_captcha_page(html):
@@ -225,6 +338,109 @@ class HHClient:
                 return ""
         return ""
 
+    def _fetch_description_fast(self, vacancy_id):
+        for attempt in range(2):
+            try:
+                _rate_limit(0.5)
+                resp = self.scrape_session.get(f"https://hh.ru/vacancy/{vacancy_id}", timeout=15)
+                html = resp.text
+                if self._is_captcha_page(html):
+                    if attempt == 0:
+                        time.sleep(5)
+                        continue
+                    return None
+                m = re.search(r'"description":\s*"((?:[^"\\]|\\.)*)"', html)
+                if m:
+                    desc = m.group(1)
+                    desc = json.loads('"' + desc + '"')
+                    return desc
+                return ""
+            except Exception:
+                if attempt == 0:
+                    time.sleep(5)
+                    continue
+                return None
+        return None
+
+    def _fetch_vacancy_meta(self, vacancy_id):
+        for attempt in range(2):
+            try:
+                _rate_limit(0.5)
+                resp = self.scrape_session.get(f"https://hh.ru/vacancy/{vacancy_id}", timeout=15)
+                html = resp.text
+                if self._is_captcha_page(html):
+                    if attempt == 0:
+                        time.sleep(5)
+                        continue
+                    return None
+                result = {}
+                m = re.search(r'"description":\s*"((?:[^"\\]|\\.)*)"', html)
+                if m:
+                    result["description"] = json.loads('"' + m.group(1) + '"')
+                sm = re.search(r'"schedule":\{"id":"([^"]+)","name":"([^"]+)"', html)
+                if sm:
+                    result["schedule"] = {"id": sm.group(1), "name": sm.group(2)}
+                else:
+                    for sid, sname in SCHEDULE_MAP.items():
+                        if re.search(rf'{re.escape(sname)}', html):
+                            result["schedule"] = {"id": sid, "name": sname}
+                            break
+                return result
+            except Exception:
+                if attempt == 0:
+                    time.sleep(5)
+                    continue
+                return None
+        return None
+
+    def fetch_descriptions_batch(self, vacancies: list) -> list:
+        need_scrape = []
+        for i, v in enumerate(vacancies):
+            vid = v.get("id")
+            if not vid:
+                continue
+            missing_desc = not v.get("description")
+            missing_schedule = not v.get("schedule")
+            missing_responses = v.get("responsesCount") is None
+            if missing_desc or (missing_schedule and missing_responses):
+                need_scrape.append((i, vid, missing_desc, missing_schedule, missing_responses))
+
+        if not need_scrape:
+            return vacancies
+
+        meta_map = {}
+        consecutive_none = 0
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            future_to_idx = {executor.submit(self._fetch_vacancy_meta, vid): idx for idx, vid, _, _, _ in need_scrape}
+            for future in as_completed(future_to_idx):
+                idx = future_to_idx[future]
+                try:
+                    result = future.result()
+                except Exception:
+                    result = None
+                if result is None:
+                    consecutive_none += 1
+                    meta_map[idx] = {}
+                    if consecutive_none >= 3:
+                        for f in future_to_idx:
+                            f.cancel()
+                        break
+                else:
+                    consecutive_none = 0
+                    meta_map[idx] = result
+
+        for i, v in enumerate(vacancies):
+            meta = meta_map.get(i, {})
+            if meta:
+                if not v.get("description") and meta.get("description"):
+                    v["description"] = meta["description"]
+                if not v.get("schedule") and meta.get("schedule"):
+                    v["schedule"] = meta["schedule"]
+                if v.get("responsesCount") is None and meta.get("responsesCount") is not None:
+                    v["responsesCount"] = meta["responsesCount"]
+
+        return vacancies
+
     def _enrich_with_scrape_details(self, vacancies: list) -> list:
         ids = []
         for v in vacancies:
@@ -232,19 +448,25 @@ class HHClient:
             if vid:
                 ids.append((len(ids), vid))
 
-        desc_map = {}
+        meta_map = {}
         with ThreadPoolExecutor(max_workers=1) as executor:
-            future_to_idx = {executor.submit(self._fetch_vacancy_description, vid): idx for idx, vid in ids}
+            future_to_idx = {executor.submit(self._fetch_vacancy_meta, vid): idx for idx, vid in ids}
             for future in as_completed(future_to_idx):
                 idx = future_to_idx[future]
                 try:
-                    desc_map[idx] = future.result()
+                    meta_map[idx] = future.result() or {}
                 except Exception:
-                    desc_map[idx] = ""
+                    meta_map[idx] = {}
 
         for i, v in enumerate(vacancies):
-            if not v.get("description"):
-                v["description"] = desc_map.get(i, "")
+            meta = meta_map.get(i, {})
+            if meta:
+                if not v.get("description") and meta.get("description"):
+                    v["description"] = meta["description"]
+                if meta.get("schedule"):
+                    v["schedule"] = meta["schedule"]
+                if meta.get("responsesCount") is not None:
+                    v["responsesCount"] = meta["responsesCount"]
 
         return vacancies
 
@@ -262,6 +484,7 @@ class HHClient:
         area: Optional[str] = None,
         schedule: Optional[str] = None,
         page_limit: int = 1,
+        title_only: bool = False,
     ) -> dict:
         import urllib.parse
         params = {
@@ -285,14 +508,15 @@ class HHClient:
                 break
             vacancies = self._parse_scraped_page(html)
             all_results.extend(vacancies)
-            if len(vacancies) < 5:
+            if len(vacancies) == 0:
                 break
+            if page + 1 < page_limit:
+                time.sleep(2)
 
         all_results = all_results[:250]
-        first_10 = all_results[:10]
-        first_10 = self._enrich_with_skills(first_10)
-        first_10 = self._enrich_with_scrape_details(first_10)
-        all_results = first_10 + all_results[10:]
+        if title_only:
+            query_words = text.lower().split()
+            all_results = [v for v in all_results if all(w in (v.get("name") or "").lower() for w in query_words)]
         return self._format_results(all_results)
 
     def _is_captcha_page(self, html: str) -> bool:
@@ -394,7 +618,11 @@ class HHClient:
 
             vacancy_id = v.get("id") or v.get("vacancyId")
             url = v.get("alternate_url") or f"https://hh.ru/vacancy/{vacancy_id}"
-            responses_count = v.get("responsesCount") or v.get("totalResponsesCount")
+            responses_count = v.get("responsesCount")
+            if responses_count is None:
+                responses_count = v.get("totalResponsesCount")
+            if responses_count is None:
+                responses_count = v.get("responses_count")
 
             results.append({
                 "id": vacancy_id,

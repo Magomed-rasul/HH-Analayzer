@@ -2,7 +2,6 @@ from collections import Counter
 from typing import List, Dict, Any
 import re
 import requests
-from itertools import combinations
 import time
 
 COMMON_SKILLS = [
@@ -31,6 +30,27 @@ TITLE_ROLES = [
 ]
 
 EXCLUDE_KEYWORDS = {r.lower() for r in TITLE_ROLES + ["ai"]}
+
+TECH_STACKS = {
+    "Python": ["Django", "Flask", "FastAPI", "Pandas", "NumPy", "PyTorch", "TensorFlow", "Celery", "SQLAlchemy", "Scrapy", "Kivy", "Keras", "Scikit-learn", "Matplotlib", "OpenCV", "Asyncio", "Tornado", "Aiohttp"],
+    "JavaScript": ["React", "Vue", "Angular", "Node.js", "Express", "Next.js", "Nuxt.js", "Svelte", "Webpack", "Vite", "Ember.js", "Backbone.js", "jQuery", "D3.js", "Chart.js", "Electron", "React Native", "Capacitor"],
+    "TypeScript": ["React", "Vue", "Angular", "Node.js", "Express", "Next.js", "Nuxt.js", "NestJS", "TypeORM", "Prisma", "Electron", "React Native", "Expo"],
+    "Java": ["Spring", "Spring Boot", "Hibernate", "Maven", "Gradle", "Jakarta EE", "Micronaut", "Quarkus", "JUnit", "Mockito", "Hadoop", "Spark", "Kafka"],
+    "C#": [".NET", "ASP.NET", "Entity Framework", "Blazor", "Xamarin", "MAUI", "Unity", "WPF", "SignalR"],
+    "C++": ["Qt", "Boost", "OpenCV", "Poco", "wxWidgets", "Unreal Engine"],
+    "PHP": ["Laravel", "Symfony", "WordPress", "CodeIgniter", "Yii", "CakePHP", "Phalcon", "Composer"],
+    "Ruby": ["Rails", "Sinatra", "RSpec", "Rubocop", "Jekyll"],
+    "Go": ["Gin", "Echo", "Fiber", "Beego", "Revel", "Cobra"],
+    "Rust": ["Actix", "Rocket", "Axum", "Tokio", "Diesel", "Tauri", "Warp"],
+    "Kotlin": ["Spring", "Ktor", "Jetpack Compose", "Android SDK", "Exposed", "Coroutines"],
+    "Swift": ["UIKit", "SwiftUI", "Vapor", "Combine", "Core Data", "Alamofire"],
+    "Dart": ["Flutter", "Provider", "Riverpod", "Bloc"],
+    "Scala": ["Play", "Akka", "Cats", "Spark"],
+    "Elixir": ["Phoenix", "Ecto", "LiveView"],
+    "MATLAB": ["Simulink"],
+    "Lua": ["LÖVE", "OpenResty"],
+    "Zig": [],
+}
 
 _rates_cache = {"rates": None, "ts": 0}
 
@@ -103,6 +123,33 @@ def extract_keywords_from_title(title: str) -> List[str]:
             seen.add(kw_clean.lower())
             unique.append(kw_clean)
     return unique
+
+
+def extract_tech_stacks(vacancies: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    stack_counter = Counter()
+    for v in vacancies:
+        text = (v.get("description", "") + " " + v.get("name", "")).lower()
+        skills = [s.lower() for s in v.get("key_skills", []) if isinstance(s, str)]
+        all_text = text + " " + " ".join(skills)
+        found_langs = []
+        for lang, frameworks in TECH_STACKS.items():
+            pattern = r'(?<![a-zA-Z])' + re.escape(lang.lower()) + r'(?![a-zA-Z])'
+            if re.search(pattern, all_text):
+                found_langs.append(lang)
+        for lang in found_langs:
+            frameworks = TECH_STACKS[lang]
+            matched_fw = []
+            for fw in frameworks:
+                fw_pattern = r'(?<![a-zA-Z])' + re.escape(fw.lower()) + r'(?![a-zA-Z])'
+                if re.search(fw_pattern, all_text):
+                    matched_fw.append(fw)
+            if matched_fw:
+                for fw in matched_fw:
+                    stack_counter[fw] += 1
+            else:
+                stack_counter[lang] += 1
+    top = stack_counter.most_common(15)
+    return [{"stack": s, "count": c} for s, c in top]
 
 
 def _median(values: list) -> float:
@@ -185,13 +232,7 @@ def analyze_vacancies(vacancies: List[Dict[str, Any]]) -> Dict[str, Any]:
     title_kw_counter = Counter(flat_title_kw)
     top_title_keywords = [(s, c) for s, c in title_kw_counter.most_common(50) if s.lower() not in EXCLUDE_KEYWORDS][:15]
 
-    tandem_counter = Counter()
-    for skills in all_skills_per_vacancy:
-        unique = sorted(set(s for s in skills if s.lower() not in EXCLUDE_KEYWORDS))
-        if len(unique) >= 2:
-            for pair in combinations(unique, 2):
-                tandem_counter[pair] += 1
-    top_tandems = tandem_counter.most_common(10)
+    top_tech_stacks = extract_tech_stacks(vacancies)
 
     salary_chart = []
     if salary_values:
@@ -205,7 +246,7 @@ def analyze_vacancies(vacancies: List[Dict[str, Any]]) -> Dict[str, Any]:
         "total_vacancies": len(vacancies),
         "top_skills": [{"skill": s, "count": c} for s, c in top_skills],
         "top_title_keywords": [{"keyword": s, "count": c} for s, c in top_title_keywords],
-        "top_tandems": [{"pair": f"{a} + {b}", "count": c} for (a, b), c in top_tandems],
+        "top_tech_stacks": top_tech_stacks,
         "experience_distribution": dict(experience_counter),
         "schedule_distribution": dict(schedule_counter),
         "salary_chart": salary_chart,
